@@ -7,7 +7,11 @@ import sublime_plugin
 import subprocess
 import time
 import csv
+import sys
 from os.path import dirname, realpath
+
+dist_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, dist_dir)
 
 def dofmt(eself, eview, sgter = None):
     self = eself
@@ -257,7 +261,7 @@ def dofmt(eself, eview, sgter = None):
             p = subprocess.Popen(cmd_fmt, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=dirnm, shell=False)
         res, err = p.communicate()
 
-        view.run_command("update_buffer", {"content": res.decode('utf-8')})
+        return res.decode('utf-8'), err
 
         if debug:
             print("err:\n", err.decode('utf-8'))
@@ -272,10 +276,13 @@ def dofmt(eself, eview, sgter = None):
 class UpdateBufferCommand(sublime_plugin.TextCommand):
     def run(self, edit, content):
         view = self.view
+        pos = view.sel()[0].begin()
         view.replace(edit, sublime.Region(0, view.size()), content);
         view.sel().clear()
         view.sel().add(sublime.Region(0))
         view.end_edit(edit)
+        view.sel().clear()
+        view.sel().add(sublime.Region(pos))
 
 def dogeneratephpdoc(eself, eview):
     self = eself
@@ -668,7 +675,10 @@ class phpfmt(sublime_plugin.EventListener):
         s = sublime.load_settings('phpfmt.sublime-settings')
         format_on_save = s.get("format_on_save", True)
         if format_on_save:
-            dofmt(self, view)
+            # dofmt(self, view)
+            view.run_command("php_fmt")
+            # sublime.set_timeout(lambda: view.run_command("save"), 0)
+
 
 class AnalyseThisCommand(sublime_plugin.TextCommand):
     def run(self, edit):
@@ -1107,3 +1117,82 @@ def _ct_poller():
         sublime.set_timeout(_ct_poller, 5000)
 
 _ct_poller()
+
+
+
+class PhpFmtCommand(sublime_plugin.TextCommand):
+    def run(self, edit):
+        vsize = self.view.size()
+        src = self.view.substr(sublime.Region(0, vsize))
+        if not src.strip():
+            return
+
+        src, err = dofmt(self, self.view)
+
+        _, err = merge(self.view, vsize, src, edit)
+        print(err)
+
+import sublime
+import sys
+
+if int(sublime.version()) >= 3000:
+    from diff_match_patch.python3.diff_match_patch import diff_match_patch
+else:
+    from diff_match_patch.python2.diff_match_patch import diff_match_patch
+
+class MergeException(Exception):
+    pass
+
+def _merge(view, size, text, edit):
+    def ss(start, end):
+        return view.substr(sublime.Region(start, end))
+    dmp = diff_match_patch()
+    diffs = dmp.diff_main(ss(0, size), text)
+    dmp.diff_cleanupEfficiency(diffs)
+    i = 0
+    dirty = False
+    for d in diffs:
+        k, s = d
+        l = len(s)
+        if k == 0:
+            # match
+            l = len(s)
+            if ss(i, i+l) != s:
+                raise MergeException('mismatch', dirty)
+            i += l
+        else:
+            dirty = True
+            if k > 0:
+                # insert
+                view.insert(edit, i, s)
+                i += l
+            else:
+                # delete
+                if ss(i, i+l) != s:
+                    raise MergeException('mismatch', dirty)
+                view.erase(edit, sublime.Region(i, i+l))
+    return dirty
+
+def merge(view, size, text, edit):
+    vs = view.settings()
+    ttts = vs.get("translate_tabs_to_spaces")
+    vs.set("translate_tabs_to_spaces", False)
+    origin_src = view.substr(sublime.Region(0, view.size()))
+    if not origin_src.strip():
+        return (False, '')
+
+    try:
+        dirty = False
+        err = ''
+        if size < 0:
+            size = view.size()
+        dirty = _merge(view, size, text, edit)
+    except MergeException as ex:
+        dirty = True
+        err = "Could not merge changes into the buffer, edit aborted: %s" % ex[0]
+        view.replace(edit, sublime.Region(0, view.size()), origin_src)
+    except Exception as ex:
+        err = "where ma bees at?: %s" % ex
+    finally:
+        vs.set("translate_tabs_to_spaces", ttts)
+        return (dirty, err)
