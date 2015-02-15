@@ -7,16 +7,7 @@ import sublime_plugin
 import subprocess
 import time
 import csv
-import sys
 from os.path import dirname, realpath
-
-dist_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, dist_dir)
-
-if int(sublime.version()) >= 3000:
-    from google.diff_match_patch.python3.diff_match_patch import diff_match_patch
-else:
-    from google.diff_match_patch.python2.diff_match_patch import diff_match_patch
 
 def dofmt(eself, eview, sgter = None):
     self = eself
@@ -249,6 +240,8 @@ def dofmt(eself, eview, sgter = None):
         if len(excludeextras) > 0:
             cmd_fmt.append("--exclude="+','.join(excludeextras))
 
+        cmd_fmt.append("-o=-")
+
         cmd_fmt.append(uri)
 
         uri_tmp = uri + "~"
@@ -263,16 +256,26 @@ def dofmt(eself, eview, sgter = None):
         else:
             p = subprocess.Popen(cmd_fmt, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=dirnm, shell=False)
         res, err = p.communicate()
+
+        view.run_command("update_buffer", {"content": res.decode('utf-8')})
+
         if debug:
             print("err:\n", err.decode('utf-8'))
-        time.sleep(1)
-        sublime.active_window().active_view().run_command("phpfmt_vet")
-        print("Formatted")
+        # sublime.set_timeout(revert_active_window, 50)
+        # time.sleep(1)
+        # sublime.active_window().active_view().run_command("phpfmt_vet")
     else:
         sublime.status_message("phpfmt: format failed - syntax errors found")
         if debug:
             print("lint error: ", lint_out)
 
+class UpdateBufferCommand(sublime_plugin.TextCommand):
+    def run(self, edit, content):
+        view = self.view
+        view.replace(edit, sublime.Region(0, view.size()), content);
+        view.sel().clear()
+        view.sel().add(sublime.Region(0))
+        view.end_edit(edit)
 
 def dogeneratephpdoc(eself, eview):
     self = eself
@@ -665,23 +668,7 @@ class phpfmt(sublime_plugin.EventListener):
         s = sublime.load_settings('phpfmt.sublime-settings')
         format_on_save = s.get("format_on_save", True)
         if format_on_save:
-            view.run_command("php_fmt")
-
-class PhpFmtCommand(sublime_plugin.TextCommand):
-    def run(self, edit):
-        vsize = self.view.size()
-        src = self.view.substr(sublime.Region(0, vsize))
-        if not src.strip():
-            return
-
-        dofmt(self, self.view)
-
-        _, err = merge(self.view, vsize, src, edit)
-        if err:
-            msg = 'PANIC: Cannot fmt file. Check your source for errors (and maybe undo any changes).'
-            sublime.error_message("%s: Merge failure: `%s'" % (msg, err))
-
-        print("Cool")
+            dofmt(self, view)
 
 class AnalyseThisCommand(sublime_plugin.TextCommand):
     def run(self, edit):
@@ -1120,64 +1107,3 @@ def _ct_poller():
         sublime.set_timeout(_ct_poller, 5000)
 
 _ct_poller()
-
-
-
-
-
-class MergeException(Exception):
-    pass
-
-def _merge(view, size, text, edit):
-    def ss(start, end):
-        return view.substr(sublime.Region(start, end))
-    dmp = diff_match_patch()
-    diffs = dmp.diff_main(ss(0, size), text)
-    dmp.diff_cleanupEfficiency(diffs)
-    i = 0
-    dirty = False
-    for d in diffs:
-        k, s = d
-        l = len(s)
-        if k == 0:
-            # match
-            l = len(s)
-            if ss(i, i+l) != s:
-                raise MergeException('mismatch', dirty)
-            i += l
-        else:
-            dirty = True
-            if k > 0:
-                # insert
-                view.insert(edit, i, s)
-                i += l
-            else:
-                # delete
-                if ss(i, i+l) != s:
-                    raise MergeException('mismatch', dirty)
-                view.erase(edit, sublime.Region(i, i+l))
-    return dirty
-
-def merge(view, size, text, edit):
-    vs = view.settings()
-    ttts = vs.get("translate_tabs_to_spaces")
-    vs.set("translate_tabs_to_spaces", False)
-    origin_src = view.substr(sublime.Region(0, view.size()))
-    if not origin_src.strip():
-        return (False, '')
-
-    try:
-        dirty = False
-        err = ''
-        if size < 0:
-            size = view.size()
-        dirty = _merge(view, size, text, edit)
-    except MergeException as ex:
-        dirty = True
-        err = "Could not merge changes into the buffer, edit aborted: %s" % ex[0]
-        view.replace(edit, sublime.Region(0, view.size()), origin_src)
-    except Exception as ex:
-        err = "Error: %s" % ex
-    finally:
-        vs.set("translate_tabs_to_spaces", ttts)
-        return (dirty, err)
